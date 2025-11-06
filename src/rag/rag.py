@@ -1,10 +1,12 @@
 """RAG query pipeline for document question answering."""
 from typing import Optional, Dict, Any, List
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from operator import itemgetter
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEndpoint
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_ollama import OllamaLLM
 
 from src.config import Config
 from src.utils import get_logger
@@ -14,13 +16,13 @@ logger = get_logger(__name__)
 
 
 class RAGPipeline:
-    """Retrieval-Augmented Generation pipeline."""
+    """Retrieval-Augmented Generation pipeline using Ollama."""
 
     def __init__(
         self,
         vector_store_manager: VectorStoreManager,
-        gen_model_id: Optional[str] = None,
-        hf_token: Optional[str] = None,
+        model_name: Optional[str] = None,
+        ollama_base_url: Optional[str] = None,
         prompt_template: Optional[str] = None,
         top_k: Optional[int] = None,
     ):
@@ -28,14 +30,14 @@ class RAGPipeline:
 
         Args:
             vector_store_manager: Initialized vector store manager
-            gen_model_id: HuggingFace model ID for generation
-            hf_token: HuggingFace API token
+            model_name: Ollama model name (e.g., 'llama2', 'mistral')
+            ollama_base_url: Ollama server URL (default: http://localhost:11434)
             prompt_template: Custom prompt template
             top_k: Number of documents to retrieve
         """
         self.vector_store_manager = vector_store_manager
-        self.gen_model_id = gen_model_id or Config.GEN_MODEL_ID
-        self.hf_token = hf_token or Config.HF_TOKEN
+        self.model_name = model_name or Config.OLLAMA_MODEL
+        self.ollama_base_url = ollama_base_url or Config.OLLAMA_BASE_URL
         self.top_k = top_k or Config.TOP_K
 
         # Create prompt template
@@ -52,42 +54,41 @@ class RAGPipeline:
         self._create_chain()
 
     def _init_llm(self) -> None:
-        """Initialize the language model."""
-        if not self.hf_token:
-            logger.warning("HF_TOKEN not provided. Using default model without authentication.")
-            logger.warning("For better results, set HF_TOKEN environment variable.")
-
-        logger.info(f"Initializing LLM: {self.gen_model_id}")
-
-        # Prepare kwargs for HuggingFaceEndpoint
-        llm_kwargs = {
-            "repo_id": self.gen_model_id,
-            "temperature": 0.7,
-            "max_new_tokens": 512,
-        }
-
-        # Only add token if it's provided
-        if self.hf_token:
-            llm_kwargs["huggingfacehub_api_token"] = self.hf_token
-
-        self.llm = HuggingFaceEndpoint(**llm_kwargs)
-        logger.info(f"Successfully initialized LLM: {self.gen_model_id}")
-
-    def _create_chain(self) -> None:
-        """Create the RAG chain."""
-        logger.info("Creating RAG chain")
+        """Initialize the Ollama language model."""
+        logger.info(f"Initializing Ollama LLM: {self.model_name}")
+        logger.info(f"Ollama server URL: {self.ollama_base_url}")
 
         try:
-            # Create document combination chain
-            self.question_answer_chain = create_stuff_documents_chain(
-                self.llm,
-                self.prompt
+            self.llm = OllamaLLM(
+                model=self.model_name,
+                base_url=self.ollama_base_url,
+                temperature=0.7,
             )
+            logger.info(f"Successfully initialized Ollama LLM: {self.model_name}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Ollama LLM: {str(e)}")
+            logger.error("Make sure Ollama is running locally. Install it from: https://ollama.ai")
+            logger.error(f"Then run: ollama pull {self.model_name}")
+            raise
 
-            # Create retrieval chain
-            self.rag_chain = create_retrieval_chain(
-                self.retriever,
-                self.question_answer_chain
+    def _format_docs(self, docs: List[Document]) -> str:
+        """Format documents for the prompt."""
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    def _create_chain(self) -> None:
+        """Create the RAG chain using LCEL."""
+        logger.info("Creating RAG chain using LCEL")
+
+        try:
+            # Create the RAG chain using LangChain Expression Language
+            self.rag_chain = (
+                RunnableParallel({
+                    "context": itemgetter("input") | self.retriever | self._format_docs,
+                    "input": itemgetter("input")
+                })
+                | self.prompt
+                | self.llm
+                | StrOutputParser()
             )
 
             logger.info("RAG chain created successfully")
@@ -108,17 +109,19 @@ class RAGPipeline:
         logger.info(f"Processing query: '{question}'")
 
         try:
-            # Invoke the RAG chain
-            response = self.rag_chain.invoke({"input": question})
+            # Get the answer
+            answer = self.rag_chain.invoke({"input": question})
 
             result = {
-                "question": response["input"],
-                "answer": response["answer"],
+                "question": question,
+                "answer": answer,
             }
 
-            if return_sources and "context" in response:
-                result["sources"] = self._format_sources(response["context"])
-                result["num_sources"] = len(response["context"])
+            # Get source documents if requested
+            if return_sources:
+                context_docs = self.retriever.invoke(question)
+                result["sources"] = self._format_sources(context_docs)
+                result["num_sources"] = len(context_docs)
 
             logger.info(f"Query processed successfully. Answer length: {len(result['answer'])} chars")
             return result

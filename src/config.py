@@ -21,13 +21,10 @@ class Config:
         "EMBED_MODEL_ID",
         "sentence-transformers/all-MiniLM-L6-v2"
     )
-    GEN_MODEL_ID: str = os.getenv(
-        "GEN_MODEL_ID",
-        "google/flan-t5-large"  # Default to a model that supports text-generation task
-    )
 
-    # HuggingFace Token
-    HF_TOKEN: Optional[str] = os.getenv("HF_TOKEN")
+    # Ollama Configuration
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     # Vector Database Configuration
     MILVUS_COLLECTION_NAME: str = "docusearch_documents"
@@ -75,5 +72,6 @@ Answer:"""
     @classmethod
     def validate(cls) -> None:
         """Validate configuration."""
-        if not cls.HF_TOKEN:
-            print("WARNING: HF_TOKEN not set. LLM generation may not work.")
+        print(f"INFO: Using Ollama model: {cls.OLLAMA_MODEL}")
+        print(f"INFO: Ollama URL: {cls.OLLAMA_BASE_URL}")
+        print("INFO: Make sure Ollama is running. Install from: https://ollama.ai")
