@@ -11,3 +11,13 @@ wheels/
 
 # environments
 .env
+
+# Data
+data/
+
+# Vector Database
+.vectordb/
+
+# Logs
+*.log
+logs/
